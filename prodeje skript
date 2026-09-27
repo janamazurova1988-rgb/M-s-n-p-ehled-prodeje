@@ -1,0 +1,174 @@
+"""
+Analýza prodejů z Excelu
+------------------------
+Co skript dělá:
+  1. Načte soubor ukazkova_data_prodeje.xlsx (sloupce: datum, produkt, region, hodnota).
+  2. Spočítá měsíční souhrny podle produktu a podle regionu.
+  3. Vykreslí dva grafy a uloží je jako PNG.
+  4. Uloží výsledný Excel se souhrny (souhrny jsou vzorce SUMIFS,
+     takže se přepočítají, když v listu Data změníte čísla).
+
+Spuštění:  python analyza_prodeju.py
+Potřebné knihovny:  pip install pandas openpyxl matplotlib
+"""
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+
+VSTUP = "ukazkova_data_prodeje.xlsx"
+VYSTUP = "souhrn_prodeju.xlsx"
+
+# Barvy pro grafy (každý produkt/region má vždy stejnou barvu)
+BARVY = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
+MESICE = ["led", "úno", "bře", "dub", "kvě", "čvn", "čvc", "srp", "zář", "říj", "lis", "pro"]
+
+# ---------------------------------------------------------------
+# 1) Načtení dat
+# ---------------------------------------------------------------
+data = pd.read_excel(VSTUP, sheet_name="Data")
+data["mesic"] = data["datum"].dt.month          # z data vytáhneme číslo měsíce
+print(f"Načteno {len(data)} řádků.")
+
+# ---------------------------------------------------------------
+# 2) Souhrny pomocí kontingenční tabulky (pivot)
+#    řádky = měsíce, sloupce = produkty (resp. regiony), hodnoty = součet
+# ---------------------------------------------------------------
+podle_produktu = data.pivot_table(index="mesic", columns="produkt",
+                                  values="hodnota", aggfunc="sum")
+podle_regionu = data.pivot_table(index="mesic", columns="region",
+                                 values="hodnota", aggfunc="sum")
+
+# Pořadí sloupců podle celkového objemu (největší první)
+produkty = podle_produktu.sum().sort_values(ascending=False).index.tolist()
+regiony = podle_regionu.sum().sort_values(ascending=False).index.tolist()
+podle_produktu = podle_produktu[produkty]
+podle_regionu = podle_regionu[regiony]
+
+print("\nCelkem za rok podle produktu:")
+print(podle_produktu.sum().to_string())
+
+# ---------------------------------------------------------------
+# 3) Grafy
+# ---------------------------------------------------------------
+plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10})
+
+
+def uprav_osy(ax):
+    """Decentní vzhled: bez horního a pravého rámečku, jemná mřížka."""
+    for strana in ("top", "right"):
+        ax.spines[strana].set_visible(False)
+    ax.grid(axis="y", color="#e5e5e2", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.yaxis.set_major_formatter(lambda x, _: f"{x:,.0f}".replace(",", " "))
+
+
+# Graf 1: měsíční vývoj podle produktu (čárový graf)
+fig, ax = plt.subplots(figsize=(10, 5.5))
+for barva, produkt in zip(BARVY, produkty):
+    y = podle_produktu[produkt]
+    ax.plot(y.index, y.values, color=barva, linewidth=2, marker="o", markersize=4, label=produkt)
+ax.set_xticks(range(1, 13), MESICE)
+ax.set_title("Měsíční prodeje podle produktu (2025)", loc="left", fontsize=13, fontweight="bold")
+ax.set_ylabel("Prodaná balení")
+ax.legend(frameon=False, ncol=5, loc="upper left", bbox_to_anchor=(0, -0.08), fontsize=9)
+uprav_osy(ax)
+fig.tight_layout()
+fig.savefig("graf_produkty.png", dpi=150)
+plt.close(fig)
+
+# Graf 2: celkové prodeje podle regionu (sloupcový graf)
+celkem_region = podle_regionu.sum()
+fig, ax = plt.subplots(figsize=(8, 5))
+sloupce = ax.bar(celkem_region.index, celkem_region.values,
+                 color=BARVY[0], width=0.6)
+ax.bar_label(sloupce, labels=[f"{v:,.0f}".replace(",", " ") for v in celkem_region.values],
+             padding=4, fontsize=10, color="#0b0b0b")
+ax.set_title("Celkové prodeje podle regionu (2025)", loc="left", fontsize=13, fontweight="bold")
+ax.set_ylabel("Prodaná balení")
+uprav_osy(ax)
+fig.tight_layout()
+fig.savefig("graf_regiony.png", dpi=150)
+plt.close(fig)
+print("\nGrafy uloženy: graf_produkty.png, graf_regiony.png")
+
+# ---------------------------------------------------------------
+# 4) Výsledný Excel
+#    List Data = původní data; souhrnné listy obsahují vzorce SUMIFS,
+#    které sčítají hodnoty z listu Data.
+# ---------------------------------------------------------------
+with pd.ExcelWriter(VYSTUP, engine="openpyxl") as writer:
+    data.drop(columns="mesic").to_excel(writer, sheet_name="Data", index=False)
+
+wb = load_workbook(VYSTUP)
+posledni = len(data) + 1                             # poslední řádek dat v listu Data
+PISMO = Font(name="Arial")
+HLAVICKA = Font(name="Arial", bold=True, color="FFFFFF")
+MODRA = PatternFill("solid", fgColor="1F4E78")
+
+
+def souhrnny_list(nazev, sloupec_dat, polozky):
+    """Vytvoří list: řádky = měsíce, sloupce = položky, buňky = vzorce SUMIFS."""
+    ws = wb.create_sheet(nazev)
+    ws.append(["Měsíc"] + polozky + ["Celkem"])
+    n = len(polozky)
+    for m in range(1, 13):
+        r = m + 1
+        ws.cell(r, 1, f"{m}/2025")
+        for i, polozka in enumerate(polozky, start=2):
+            hlavicka = ws.cell(1, i).coordinate.replace("1", "$1")   # např. B$1
+            # součet hodnot, kde produkt/region = hlavička sloupce a datum spadá do měsíce m
+            # (DATE(2025,13,1) Excel sám převede na 1. 1. 2026)
+            ws.cell(r, i, (
+                f"=SUMIFS(Data!$D$2:$D${posledni},"
+                f"Data!${sloupec_dat}$2:${sloupec_dat}${posledni},{hlavicka},"
+                f"Data!$A$2:$A${posledni},\">=\"&DATE(2025,{m},1),"
+                f"Data!$A$2:$A${posledni},\"<\"&DATE(2025,{m + 1},1))"
+            ))
+        pismeno_posl = ws.cell(r, n + 1).column_letter
+        ws.cell(r, n + 2, f"=SUM(B{r}:{pismeno_posl}{r})")
+    # řádek Celkem
+    ws.cell(14, 1, "Celkem")
+    for c in range(2, n + 3):
+        L = ws.cell(14, c).column_letter
+        ws.cell(14, c, f"=SUM({L}2:{L}13)")
+    # formát
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.font = PISMO
+            if cell.column > 1:
+                cell.number_format = "#,##0"
+    for cell in ws[1]:
+        cell.font = HLAVICKA
+        cell.fill = MODRA
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    for cell in ws[14]:
+        cell.font = Font(name="Arial", bold=True)
+    ws.column_dimensions["A"].width = 10
+    for c in range(2, n + 3):
+        ws.column_dimensions[ws.cell(1, c).column_letter].width = 16
+    ws.freeze_panes = "B2"
+
+
+souhrnny_list("Podle produktu", "B", produkty)   # sloupec B v listu Data = produkt
+souhrnny_list("Podle regionu", "C", regiony)     # sloupec C v listu Data = region
+
+# vzhled listu Data
+d = wb["Data"]
+for row in d.iter_rows():
+    for cell in row:
+        cell.font = PISMO
+for cell in d[1]:
+    cell.font = HLAVICKA
+    cell.fill = MODRA
+for r in range(2, posledni + 1):
+    d.cell(r, 1).number_format = "DD.MM.YYYY"
+    d.cell(r, 4).number_format = "#,##0"
+for col, w in zip("ABCD", [13, 20, 12, 12]):
+    d.column_dimensions[col].width = w
+
+wb.move_sheet("Data", offset=2)                   # souhrny dopředu, data na konec
+wb.active = 0
+wb.save(VYSTUP)
+print(f"Excel uložen: {VYSTUP}")
